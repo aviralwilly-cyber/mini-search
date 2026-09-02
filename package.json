@@ -1,0 +1,25 @@
+{
+  "name": "mini-search",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "A from-scratch search engine with an inverted index and BM25 ranking",
+  "license": "ISC",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "corpus": "tsx src/scripts/fetch-corpus.ts",
+    "index": "tsx src/scripts/build-index.ts",
+    "bench": "tsx src/scripts/bench.ts",
+    "test": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.3",
+    "fastify": "^5.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}

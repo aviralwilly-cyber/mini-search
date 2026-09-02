@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mini-search — inverted index + BM25</title>
+<style>
+  :root {
+    --bg:      #0b0d10;
+    --panel:   #101318;
+    --rule:    #1e232c;
+    --rule-hi: #2c333f;
+    --text:    #d6dbe3;
+    --dim:     #6b7480;
+    --dimmer:  #454d59;
+    --accent:  #7dd3a0;
+    --warm:    #d9a05b;
+    --hot:     #e07a5f;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .shell { display: grid; grid-template-columns: 1fr 340px; min-height: 100vh; }
+  main { display: flex; flex-direction: column; min-height: 100vh; }
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: 1fr; }
+    main { min-height: 0; }
+    .rail { border-left: 0 !important; border-top: 1px solid var(--rule); }
+  }
+
+  /* ---- help affordance ---- */
+  .q {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 13px; height: 13px; margin-left: 6px;
+    border: 1px solid var(--dimmer); border-radius: 50%;
+    color: var(--dimmer); font-size: 9px; line-height: 1;
+    cursor: pointer; user-select: none; vertical-align: middle; flex-shrink: 0;
+  }
+  .q:hover { border-color: var(--accent); color: var(--accent); }
+  .q.open { border-color: var(--accent); color: var(--accent); background: #14251c; }
+
+  #pop {
+    position: fixed; z-index: 100; max-width: 330px;
+    background: #141920; border: 1px solid var(--rule-hi);
+    padding: 12px 14px; font-size: 11.5px; line-height: 1.65;
+    color: var(--dim); box-shadow: 0 8px 28px rgba(0,0,0,.6);
+  }
+  #pop h4 { margin: 0 0 7px; font-size: 11px; color: var(--text);
+            font-weight: 600; letter-spacing: .02em; }
+  #pop p { margin: 0 0 8px; }
+  #pop p:last-child { margin-bottom: 0; }
+  #pop .eg { color: var(--dimmer); border-left: 2px solid var(--rule-hi);
+             padding-left: 9px; margin-top: 8px; }
+  #pop code { color: var(--accent); }
+  #pop .why { color: var(--warm); }
+
+  /* ---- guided tour ---- */
+  #spot {
+    position: fixed; z-index: 200; pointer-events: none;
+    border: 1px solid var(--accent);
+    box-shadow: 0 0 0 9999px rgba(4, 6, 8, .78);
+    transition: top .28s ease, left .28s ease, width .28s ease, height .28s ease;
+  }
+  #tour {
+    position: fixed; z-index: 201; width: 300px;
+    background: #141920; border: 1px solid var(--accent);
+    padding: 13px 15px 12px; box-shadow: 0 10px 34px rgba(0,0,0,.7);
+    transition: top .28s ease, left .28s ease;
+  }
+  #tour h4 { margin: 0 0 7px; font-size: 11.5px; color: var(--text); font-weight: 600; }
+  #tour p { margin: 0 0 6px; font-size: 11.5px; line-height: 1.6; color: var(--dim); }
+  #tour p:last-of-type { margin-bottom: 0; }
+  #tour code { color: var(--accent); }
+  #tour .nav { display: flex; align-items: center; gap: 10px;
+               margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule); }
+  #tour .step { color: var(--dimmer); font-size: 10px; margin-right: auto; }
+  #tour button { background: none; border: 1px solid var(--rule-hi); color: var(--dim);
+                 font: inherit; font-size: 11px; padding: 3px 10px; cursor: pointer; }
+  #tour button:hover { border-color: var(--accent); color: var(--accent); }
+  #tour button.go { border-color: var(--accent); color: var(--accent); }
+  #tour button.go:hover { background: #14251c; }
+
+  /* ---- header ---- */
+  header { border-bottom: 1px solid var(--rule); padding: 14px 20px;
+           display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  header h1 { font-size: 13px; font-weight: 600; margin: 0; letter-spacing: .02em; }
+  header .stat { color: var(--dim); font-size: 11px; }
+  header .stat b { color: var(--text); font-weight: 500; }
+  header .links { margin-left: auto; display: flex; gap: 14px; font-size: 11px; }
+  header .links span, header .links a { color: var(--dimmer); cursor: pointer;
+                                        border-bottom: 1px dotted var(--dimmer); }
+  header .links span:hover, header .links a:hover {
+    color: var(--accent); border-color: var(--accent); text-decoration: none; }
+
+  /* ---- search ---- */
+  .searchbar { padding: 20px; border-bottom: 1px solid var(--rule); position: relative; }
+  .field { display: flex; align-items: center; gap: 10px;
+           border: 1px solid var(--rule-hi); background: var(--panel); padding: 0 12px; }
+  .field:focus-within { border-color: var(--accent); }
+  .field .caret { color: var(--accent); user-select: none; }
+  input[type=text] { flex: 1; background: none; border: 0; outline: none;
+                     color: var(--text); font: inherit; font-size: 14px; padding: 11px 0; }
+  .sg { position: absolute; left: 20px; right: 20px; z-index: 20;
+        background: var(--panel); border: 1px solid var(--rule-hi); border-top: 0; }
+  .sg div { padding: 6px 12px; cursor: pointer; display: flex; justify-content: space-between; }
+  .sg div.on, .sg div:hover { background: #171c24; }
+  .sg em { font-style: normal; color: var(--accent); }
+  .sg span:last-child { color: var(--dimmer); font-size: 11px; }
+
+  .chips { display: flex; gap: 7px; margin-top: 11px; flex-wrap: wrap; align-items: center; }
+  .chips .lbl { color: var(--dimmer); font-size: 10.5px; margin-right: 2px; }
+  .chip { border: 1px solid var(--rule-hi); background: var(--panel); color: var(--dim);
+          font: inherit; font-size: 11px; padding: 3px 9px; cursor: pointer; }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+  .chip small { color: var(--dimmer); margin-left: 6px; font-size: 10px; }
+  .chip:hover small { color: var(--dim); }
+  .sghint { color: var(--dimmer); font-size: 10.5px; margin-top: 9px;
+            display: flex; align-items: center; }
+
+  /* ---- readout strip ---- */
+  .readout { display: flex; border-bottom: 1px solid var(--rule); background: var(--panel); }
+  .readout .cell { padding: 9px 16px; border-right: 1px solid var(--rule); }
+  .readout .k { color: var(--dimmer); font-size: 10px; text-transform: uppercase;
+                letter-spacing: .08em; display: flex; align-items: center; }
+  .readout .v { font-size: 15px; margin-top: 2px; }
+  .readout .v.lit { color: var(--accent); }
+  .readout .terms { display: flex; gap: 5px; margin-top: 3px; flex-wrap: wrap; }
+  .readout .terms code { background: #1a2029; padding: 1px 5px; font-size: 11px; }
+  .readout .terms code.miss { color: var(--dimmer); text-decoration: line-through; }
+
+  /* ---- results ---- */
+  .results { padding: 0 20px 24px; flex: 1; }
+  .hit { border-bottom: 1px solid var(--rule); padding: 13px 0; }
+  .hit-row { display: grid; grid-template-columns: 52px 1fr auto; gap: 12px; align-items: baseline; }
+  .rank { color: var(--dimmer); font-size: 11px; }
+  .kind { display: inline-block; font-size: 10px; color: var(--dim);
+          border: 1px solid var(--rule-hi); padding: 0 4px; margin-right: 7px; }
+  .title { font-size: 13.5px; }
+  .score { color: var(--warm); cursor: pointer; white-space: nowrap; }
+  .score:hover { color: var(--hot); }
+  .bar { height: 2px; background: var(--rule); margin-top: 8px; }
+  .bar i { display: block; height: 100%; background: var(--warm); }
+  .snip { color: var(--dim); font-size: 12px; margin-top: 5px;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hintbar { color: var(--dimmer); font-size: 10.5px; padding: 10px 0 0;
+             display: flex; align-items: center; }
+
+  /* ---- explain table ---- */
+  .explain { margin-top: 10px; border: 1px solid var(--rule); background: var(--panel); }
+  .explain .lead { padding: 9px 10px; color: var(--dim); font-size: 11px;
+                   border-bottom: 1px solid var(--rule); line-height: 1.6; }
+  .explain table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .explain th { text-align: right; color: var(--dimmer); font-weight: 400;
+                padding: 6px 10px; border-bottom: 1px solid var(--rule);
+                text-transform: uppercase; letter-spacing: .06em; font-size: 10px;
+                cursor: help; }
+  .explain th:hover { color: var(--accent); }
+  .explain th:first-child, .explain td:first-child { text-align: left; }
+  .explain td { text-align: right; padding: 5px 10px; border-bottom: 1px solid #161a21; }
+  .explain tr:last-child td { border-bottom: 0; }
+  .explain .sum td { color: var(--warm); border-top: 1px solid var(--rule); }
+  .explain .formula { padding: 7px 10px; color: var(--dimmer); font-size: 10.5px;
+                      border-top: 1px solid var(--rule); }
+
+  /* ---- footer ---- */
+  .credit { border-top: 1px solid var(--rule); padding: 15px 20px 22px;
+            color: var(--dimmer); font-size: 10.5px;
+            display: flex; gap: 8px 16px; flex-wrap: wrap; align-items: baseline; }
+  .credit .sep { color: var(--rule-hi); }
+  .credit .built { color: var(--dim); }
+  .credit a { color: var(--dim); border-bottom: 1px dotted var(--dimmer); }
+  .credit a:hover { color: var(--accent); border-color: var(--accent); text-decoration: none; }
+  .credit .built a { color: var(--text); }
+  .credit .built a:hover { color: var(--accent); }
+
+  /* ---- right rail ---- */
+  .rail { border-left: 1px solid var(--rule); background: var(--panel); }
+  .mod { border-bottom: 1px solid var(--rule); padding: 14px 16px; }
+  .mod h2 { font-size: 10px; text-transform: uppercase; letter-spacing: .1em;
+            color: var(--dimmer); margin: 0 0 11px; font-weight: 500;
+            display: flex; align-items: center; }
+  .knob { margin-bottom: 13px; }
+  .knob:last-child { margin-bottom: 0; }
+  .knob .lbl { display: flex; justify-content: space-between; align-items: center;
+               font-size: 11px; margin-bottom: 5px; }
+  .knob .lbl > span { display: flex; align-items: center; }
+  .knob .lbl b { color: var(--accent); font-weight: 500; }
+  .knob .hint { color: var(--dimmer); font-size: 10px; margin-top: 4px; line-height: 1.4; }
+  input[type=range] { width: 100%; accent-color: var(--accent); height: 3px; }
+
+  .hist { display: flex; align-items: flex-end; gap: 1px; height: 54px;
+          border-bottom: 1px solid var(--rule-hi); }
+  .hist i { flex: 1; background: var(--rule-hi); min-height: 1px; }
+  .hist i.recent { background: var(--accent); }
+  .histx { display: flex; justify-content: space-between; color: var(--dimmer);
+           font-size: 10px; margin-top: 4px; }
+  .pct { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+  .pct div { text-align: center; }
+  .pct .k { color: var(--dimmer); font-size: 10px; }
+  .pct .v { font-size: 12px; margin-top: 2px; }
+
+  .plist { font-size: 11px; }
+  .plist .row { display: flex; justify-content: space-between; padding: 2.5px 0; color: var(--dim); }
+  .plist .hdr { display: flex; justify-content: space-between; color: var(--dimmer);
+                border-bottom: 1px solid var(--rule); padding-bottom: 5px; margin-bottom: 6px;
+                font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  .plist .stats { display: flex; gap: 14px; margin-bottom: 9px; }
+  .plist .stats span { color: var(--dimmer); font-size: 10px; }
+  .plist .stats b { color: var(--text); font-weight: 500; display: block; font-size: 12px; }
+  .rail input[type=text] { width: 100%; background: var(--bg); border: 1px solid var(--rule-hi);
+                           color: var(--text); font: inherit; font-size: 11px; padding: 5px 8px;
+                           outline: none; margin-bottom: 10px; }
+  .rail input[type=text]:focus { border-color: var(--accent); }
+  .empty { color: var(--dimmer); font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <main>
+    <header>
+      <h1>mini-search</h1>
+      <span class="stat" id="corpus">initialising…</span>
+      <span class="links">
+        <span data-help="about">what is this?</span>
+        <span id="start-tour">take the tour</span>
+        <a href="/how.html">how it works</a>
+      </span>
+    </header>
+
+    <div class="searchbar" id="sb">
+      <div class="field">
+        <span class="caret">&gt;</span>
+        <input type="text" id="q" placeholder="query the index" autocomplete="off" autofocus>
+      </div>
+      <div class="sg" id="sg" hidden></div>
+
+      <div class="chips" id="chips">
+        <span class="lbl">try:</span>
+      </div>
+
+      <div class="sghint">Suggestions come from a trie<span class="q" data-help="trie">?</span></div>
+    </div>
+
+    <div class="readout" id="readout">
+      <div class="cell">
+        <div class="k">latency<span class="q" data-help="latency">?</span></div>
+        <div class="v lit" id="r-ms">—</div>
+      </div>
+      <div class="cell">
+        <div class="k">matches<span class="q" data-help="matches">?</span></div>
+        <div class="v" id="r-n">—</div>
+      </div>
+      <div class="cell" style="flex:1">
+        <div class="k">analysed terms<span class="q" data-help="analyse">?</span></div>
+        <div class="terms" id="r-terms"><span class="empty">—</span></div>
+      </div>
+    </div>
+
+    <div class="results" id="out"></div>
+
+    <footer class="credit">
+      <span class="built">Built and designed by
+        <a href="https://github.com/aviralwilly-cyber" target="_blank" rel="noopener">Aviral Abel Willy</a>.</span>
+      <span class="sep">·</span>
+      <span>© 2026 All rights reserved.</span>
+      <span class="sep">·</span>
+      <a href="/how.html">how it works</a>
+    </footer>
+  </main>
+
+  <aside class="rail">
+    <div class="mod" id="mod-params">
+      <h2>BM25 parameters<span class="q" data-help="bm25">?</span></h2>
+      <div class="knob">
+        <div class="lbl">
+          <span>k1 — tf saturation<span class="q" data-help="k1">?</span></span>
+          <b id="v-k1">1.20</b>
+        </div>
+        <input type="range" id="k1" min="0" max="3" step="0.05" value="1.2">
+        <div class="hint">How fast repeated terms stop helping. 0 = presence only.</div>
+      </div>
+      <div class="knob">
+        <div class="lbl">
+          <span>b — length norm<span class="q" data-help="b">?</span></span>
+          <b id="v-b">0.75</b>
+        </div>
+        <input type="range" id="b" min="0" max="1" step="0.05" value="0.75">
+        <div class="hint">How hard long documents are penalised. 0 = length ignored.</div>
+      </div>
+    </div>
+
+    <div class="mod" id="mod-hist">
+      <h2>query latency<span class="q" data-help="hist">?</span></h2>
+      <div class="hist" id="hist"></div>
+      <div class="histx"><span>oldest</span><span>latest</span></div>
+      <div class="pct">
+        <div><div class="k">p50</div><div class="v" id="p50">—</div></div>
+        <div><div class="k">p95</div><div class="v" id="p95">—</div></div>
+        <div><div class="k">max</div><div class="v" id="pmax">—</div></div>
+      </div>
+    </div>
+
+    <div class="mod" id="mod-post">
+      <h2>posting list<span class="q" data-help="posting">?</span></h2>
+      <input type="text" id="pterm" placeholder="inspect a term…" autocomplete="off">
+      <div class="plist" id="plist"><div class="empty">enter a term to inspect its posting list</div></div>
+    </div>
+  </aside>
+</div>
+
+<div id="pop" hidden></div>
+<div id="spot" hidden></div>
+<div id="tour" hidden></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c =>
+  ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+
+/* ============ help content ============ */
+const HELP = {
+  about: {
+    t: "What this is",
+    h: `<p>A search engine built from scratch — no Elasticsearch, no Lucene,
+        no search libraries. Every piece is hand-written: the text processing,
+        the index, the ranking maths, the autocomplete.</p>
+        <p>The corpus is 100,000 Hacker News stories and comments.</p>
+        <p class="why">The panels around the results aren't decoration — they
+        expose what the engine is doing on every keystroke.</p>`
+  },
+  index: {
+    t: "Inverted index",
+    h: `<p>Normally a document points to its words. An <b>inverted</b> index
+        flips that: each word points to the documents containing it — like the
+        index at the back of a textbook.</p>
+        <p>Without it, answering a query means reading all 100,000 documents.
+        With it, you jump straight to the handful that matter.</p>
+        <div class="eg">"postings" = the total number of word→document links.
+        1.9 million of them here.</div>`
+  },
+  analyse: {
+    t: "Analysed terms",
+    h: `<p>Your raw query isn't what gets looked up. It goes through the same
+        pipeline every document went through when it was indexed:</p>
+        <p><code>lowercase → strip HTML → split on punctuation → drop stopwords → stem</code></p>
+        <p>Stemming chops suffixes so related words collapse together —
+        <code>running</code>, <code>runs</code>, and <code>run</code> should all
+        find each other.</p>
+        <div class="eg">Terms shown struck through were analysed away or aren't
+        in the index at all.</div>
+        <p class="why">Both sides must use the identical pipeline. If indexing
+        and querying ever disagree, search silently returns nothing.</p>`
+  },
+  latency: {
+    t: "Latency",
+    h: `<p>Time spent scoring and ranking inside the engine — not counting
+        network or JSON encoding.</p>
+        <p>Rare words are nearly free. Common words like "ai" appear in over
+        11,000 documents, and every one has to be scored.</p>
+        <div class="eg">Try a rare word, then a common one, and watch the number
+        move.</div>`
+  },
+  matches: {
+    t: "Matches",
+    h: `<p>How many results came back, capped at 20 for display.</p>
+        <p>A document matches if it contains <b>any</b> query term, not all of
+        them. Ranking is what separates "contains one word" from "is actually
+        about this".</p>`
+  },
+  bm25: {
+    t: "BM25 ranking",
+    h: `<p>The formula deciding what goes first. It balances three signals:</p>
+        <p><b>Rarity.</b> A word in every document tells you nothing. A rare
+        word is a strong signal.</p>
+        <p><b>Repetition.</b> A document saying "dragon" nine times is probably
+        more about dragons than one saying it once — but with diminishing
+        returns.</p>
+        <p><b>Length.</b> A long document mentions more words by accident, so
+        its matches count for less.</p>
+        <p class="why">BM25 is roughly 30 years old and still the default in
+        Elasticsearch and Lucene today.</p>`
+  },
+  k1: {
+    t: "k1 — term frequency saturation",
+    h: `<p>Controls how fast repeated words stop helping.</p>
+        <p>Going from 1 mention to 5 is a big signal. From 50 to 55, almost
+        nothing. k1 sets where that curve flattens.</p>
+        <div class="eg"><b>k1 = 0</b> — repetition ignored entirely; a word is
+        either present or absent.<br>
+        <b>k1 = 3</b> — repetition keeps mattering much longer.</div>
+        <p>Drag it and watch results that repeat your query word rise or fall.</p>`
+  },
+  b: {
+    t: "b — length normalisation",
+    h: `<p>Controls how much long documents get penalised.</p>
+        <p>A 5,000-word comment will contain your query word eventually, just by
+        chance. A 6-word headline containing it is far more likely to be about
+        it.</p>
+        <div class="eg"><b>b = 0</b> — length ignored; long comments climb.<br>
+        <b>b = 1</b> — full penalty; short titles dominate.</div>
+        <p>Drag it to 0 and watch long comments take over the top of the list.</p>`
+  },
+  explain: {
+    t: "Score breakdown",
+    h: `<p>Every number behind a result's rank, per query term.</p>
+        <p><b>df</b> — documents containing this term.<br>
+        <b>idf</b> — inverse document frequency; how rare, and therefore how
+        valuable, the term is.<br>
+        <b>tf</b> — times the term appears in <i>this</i> document.<br>
+        <b>len</b> — this document's length in tokens.<br>
+        <b>norm</b> — the length penalty, driven by <code>b</code>.<br>
+        <b>score</b> — this term's contribution.</p>
+        <p class="why">The contributions sum to the total. Nothing is hidden.</p>`
+  },
+  trie: {
+    t: "Trie autocomplete",
+    h: `<p>A tree where each level is one letter. Following <code>d→r→a</code>
+        lands on a branch holding every word starting with "dra".</p>
+        <p>Suggestions are ranked by how many documents contain each word, so
+        common terms surface first.</p>
+        <p class="why">Naively, typing one letter meant walking a subtree holding
+        most of the 68,000-word vocabulary — 16ms per keystroke. Now each node
+        stores its own best completions, precomputed. Lookup is 0.02ms, and a
+        one-letter prefix costs the same as a ten-letter one.</p>`
+  },
+  hist: {
+    t: "Latency histogram",
+    h: `<p>The last 60 queries, most recent on the right. Bars are scaled to the
+        tallest.</p>
+        <p><b>p50</b> is the median — half your queries were faster. <b>p95</b>
+        means 95% were faster. Percentiles matter more than averages because a
+        single slow query is what a user actually notices.</p>
+        <div class="eg">The spikes are common-word queries touching thousands of
+        documents.</div>`
+  },
+  posting: {
+    t: "Posting list",
+    h: `<p>The raw data structure, unfiltered. For any term, this is the exact
+        list stored in the index: which documents contain it and how many times.</p>
+        <p><b>docId</b> is an internal sequential number, not the Hacker News id
+        — integers indexing into an array are far faster than hashing arbitrary
+        keys.</p>
+        <p class="why">These lists live in flat typed arrays rather than
+        JavaScript objects: 8 bytes per posting instead of ~96, and 12× less
+        memory overall.</p>`
+  },
+};
+
+/* ============ popover ============ */
+const pop = $("pop");
+let openBtn = null;
+
+function showHelp(btn, key) {
+  const item = HELP[key];
+  if (!item) return;
+  if (openBtn === btn) return hideHelp();
+  hideHelp();
+
+  pop.innerHTML = `<h4>${esc(item.t)}</h4>${item.h}`;
+  pop.hidden = false;
+
+  const r = btn.getBoundingClientRect();
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  let left = Math.max(10, Math.min(r.left - w / 2 + r.width / 2, window.innerWidth - w - 10));
+  let top = r.bottom + 8;
+  if (top + h > window.innerHeight - 10) top = Math.max(10, r.top - h - 8);
+  pop.style.left = left + "px";
+  pop.style.top = top + "px";
+
+  btn.classList.add("open");
+  openBtn = btn;
+}
+
+function hideHelp() {
+  pop.hidden = true;
+  if (openBtn) openBtn.classList.remove("open");
+  openBtn = null;
+}
+
+/* ============ state ============ */
+let k1 = 1.2, b = 0.75;
+let items = [], active = -1, lastResults = null, maxScore = 1;
+const latencies = [];
+
+/* ============ example chips ============ */
+const EXAMPLES = [
+  { q: "open source",   note: "two common terms" },
+  { q: "rust compiler", note: "narrow topic" },
+  { q: "google search", note: "one term dominates" },
+  { q: "postgres",      note: "single rare term" },
+  { q: "the and of",    note: "all stopwords" },
+  { q: '"machine learning"', note: "exact phrase" },
+];
+
+$("chips").insertAdjacentHTML("beforeend", EXAMPLES.map(e =>
+  `<button class="chip" data-q="${esc(e.q)}">${esc(e.q)}<small>${esc(e.note)}</small></button>`
+).join(""));
+
+$("chips").addEventListener("click", e => {
+  const chip = e.target.closest(".chip");
+  if (!chip) return;
+  $("q").value = chip.dataset.q;
+  hideSg();
+  run();
+  $("q").focus();
+});
+
+/* ============ corpus stats ============ */
+fetch("/stats").then(r => r.json()).then(s => {
+  $("corpus").innerHTML =
+    `<b>${s.docCount.toLocaleString()}</b> docs · ` +
+    `<b>${s.uniqueTerms.toLocaleString()}</b> terms · ` +
+    `<b>${s.totalPostings.toLocaleString()}</b> postings` +
+    `<span class="q" data-help="index">?</span> · ` +
+    `<b>${(s.indexBytes / 1048576).toFixed(1)} MB</b> packed`;
+}).catch(() => $("corpus").textContent = "index unavailable");
+
+/* ============ autocomplete ============ */
+function hideSg() { $("sg").hidden = true; active = -1; items = []; }
+
+async function suggest(prefix) {
+  if (prefix.length < 2) return hideSg();
+  try {
+    const r = await fetch(`/suggest?prefix=${encodeURIComponent(prefix)}`);
+    if (!r.ok) return hideSg();
+    const { suggestions } = await r.json();
+    if (!suggestions.length) return hideSg();
+
+    items = suggestions.map(s => s.word);
+    active = -1;
+    $("sg").innerHTML = suggestions.map(s =>
+      `<div><span><em>${esc(prefix)}</em>${esc(s.word.slice(prefix.length))}</span>` +
+      `<span>${s.weight.toLocaleString()}</span></div>`).join("");
+    [...$("sg").children].forEach((el, i) => el.onclick = () => pick(i));
+    $("sg").hidden = false;
+  } catch { hideSg(); }
+}
+
+function pick(i) {
+  const parts = $("q").value.split(/\s+/);
+  parts[parts.length - 1] = items[i];
+  $("q").value = parts.join(" ") + " ";
+  hideSg();
+  run();
+  $("q").focus();
+}
+
+/* ============ search ============ */
+async function run() {
+  const query = $("q").value.trim();
+  if (!query) {
+    $("out").innerHTML = "";
+    $("r-ms").textContent = "—";
+    $("r-n").textContent = "—";
+    $("r-terms").innerHTML = '<span class="empty">—</span>';
+    return;
+  }
+
+  const url = `/search?q=${encodeURIComponent(query)}&limit=20&k1=${k1}&b=${b}&explain=true`;
+  let data;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return;
+    data = await r.json();
+  } catch { return; }
+
+  lastResults = data;
+  record(data.tookMs);
+
+  $("r-ms").textContent = data.tookMs.toFixed(3) + " ms";
+  $("r-n").textContent = data.total;
+
+  // a term with no matching doc contributed nothing — show it struck through
+  const hit = new Set();
+  for (const res of data.results) for (const e of (res.explain || [])) hit.add(e.term);
+  const parts = data.parsed || [];
+  $("r-terms").innerHTML = parts.length
+    ? parts.map(p => {
+        const key = p.phrase ? `"${p.text}"` : p.text;
+        return `<code class="${hit.has(key) ? "" : "miss"}">${esc(key)}</code>`;
+      }).join("")
+    : '<span class="empty">no indexable terms</span>';
+
+  maxScore = data.results.length ? data.results[0].score : 1;
+  render();
+}
+
+function render() {
+  const d = lastResults;
+  if (!d) return;
+  if (!d.results.length) {
+    $("out").innerHTML = '<div class="hit"><span class="empty">no documents matched</span></div>';
+    return;
+  }
+
+  $("out").innerHTML =
+    `<div class="hintbar">Click any score to see exactly how it was calculated<span class="q" data-help="explain">?</span></div>` +
+    d.results.map((h, i) => {
+      const title = h.title || h.snippet.slice(0, 80) + "…";
+      const link = h.url
+        ? `<a href="${esc(h.url)}" target="_blank" rel="noopener">${esc(title)}</a>`
+        : esc(title);
+      const snip = h.title && h.snippet ? `<div class="snip">${esc(h.snippet)}</div>` : "";
+      return `<div class="hit" data-i="${i}">
+        <div class="hit-row">
+          <span class="rank">#${String(i + 1).padStart(2, "0")}</span>
+          <span class="title"><span class="kind">${esc(h.kind)}</span>${link}</span>
+          <span class="score" data-toggle="${i}">${h.score.toFixed(3)} ▾</span>
+        </div>
+        <div class="bar"><i style="width:${(h.score / maxScore * 100).toFixed(1)}%"></i></div>
+        ${snip}
+        <div class="explain" id="ex-${i}" hidden></div>
+      </div>`;
+    }).join("");
+
+  $("out").querySelectorAll("[data-toggle]").forEach(el => {
+    el.onclick = () => toggleExplain(Number(el.dataset.toggle), el);
+  });
+}
+
+const COLHELP = {
+  term: "the analysed query term",
+  df: "documents containing this term, out of 100,000",
+  idf: "how rare the term is — higher means more valuable",
+  tf: "times the term appears in this document",
+  len: "this document's length in tokens",
+  norm: "length penalty — above 1 means longer than average",
+  score: "this term's contribution to the total",
+};
+
+function toggleExplain(i, btn) {
+  const box = $("ex-" + i);
+  const hit = lastResults.results[i];
+  if (!box.hidden) {
+    box.hidden = true;
+    btn.textContent = hit.score.toFixed(3) + " ▾";
+    return;
+  }
+
+  const rows = (hit.explain || []).map(e => `<tr>
+      <td>${esc(e.term)}</td>
+      <td>${e.df.toLocaleString()}</td>
+      <td>${e.idf.toFixed(3)}</td>
+      <td>${e.tf}</td>
+      <td>${e.docLength}</td>
+      <td>${e.norm.toFixed(3)}</td>
+      <td>${e.contribution.toFixed(3)}</td>
+    </tr>`).join("");
+
+  const th = Object.entries(COLHELP)
+    .map(([k, v]) => `<th title="${esc(v)}">${k}</th>`).join("");
+
+  box.innerHTML = `
+    <div class="lead">Each row is one query term. Rare terms (low df, high idf)
+      contribute more. The contributions sum to the total below.</div>
+    <table>
+      <tr>${th}</tr>
+      ${rows}
+      <tr class="sum"><td>total</td><td colspan="5"></td>
+          <td>${hit.score.toFixed(3)}</td></tr>
+    </table>
+    <div class="formula">idf = ln(1 + (N − df + 0.5) / (df + 0.5))
+      &nbsp;·&nbsp; norm = 1 − b + b·(len / avgLen)
+      &nbsp;·&nbsp; score = idf · tf(k1+1) / (tf + k1·norm)</div>`;
+  box.hidden = false;
+  btn.textContent = hit.score.toFixed(3) + " ▴";
+}
+
+/* ============ latency histogram ============ */
+function record(ms) {
+  latencies.push(ms);
+  if (latencies.length > 60) latencies.shift();
+
+  const peak = Math.max(...latencies, 0.001);
+  $("hist").innerHTML = latencies.map((v, i) =>
+    `<i class="${i === latencies.length - 1 ? "recent" : ""}" ` +
+    `style="height:${Math.max(1, v / peak * 100)}%"></i>`).join("");
+
+  const s = [...latencies].sort((a, x) => a - x);
+  const q = p => s[Math.min(s.length - 1, Math.floor(s.length * p))].toFixed(3);
+  $("p50").textContent = q(0.5);
+  $("p95").textContent = q(0.95);
+  $("pmax").textContent = s[s.length - 1].toFixed(3);
+}
+
+/* ============ posting list inspector ============ */
+let pt;
+$("pterm").addEventListener("input", e => {
+  clearTimeout(pt);
+  const term = e.target.value.trim();
+  pt = setTimeout(() => inspect(term), 200);
+});
+
+async function inspect(term) {
+  if (!term) {
+    $("plist").innerHTML = '<div class="empty">enter a term to inspect its posting list</div>';
+    return;
+  }
+  try {
+    const r = await fetch(`/postings?term=${encodeURIComponent(term)}`);
+    const d = await r.json();
+    if (!d.term || !d.df) {
+      $("plist").innerHTML = `<div class="empty">"${esc(term)}" is not in the index` +
+        (d.term && d.term !== term ? ` (analysed to "${esc(d.term)}")` : "") + "</div>";
+      return;
+    }
+    $("plist").innerHTML =
+      `<div class="stats">
+        <span>analysed<b>${esc(d.term)}</b></span>
+        <span>df<b>${d.df.toLocaleString()}</b></span>
+        <span>idf<b>${d.idf.toFixed(3)}</b></span>
+      </div>
+      <div class="hdr"><span>docid</span><span>tf</span></div>` +
+      d.sample.map(p => `<div class="row"><span>${p.docId}</span><span>${p.tf}</span></div>`).join("") +
+      (d.df > d.sample.length
+        ? `<div class="row" style="color:var(--dimmer)"><span>+${(d.df - d.sample.length).toLocaleString()} more</span><span></span></div>`
+        : "");
+  } catch {
+    $("plist").innerHTML = '<div class="empty">lookup failed</div>';
+  }
+}
+
+/* ============ parameter knobs ============ */
+for (const [id, setter] of [["k1", v => k1 = v], ["b", v => b = v]]) {
+  $(id).addEventListener("input", e => {
+    const v = Number(e.target.value);
+    setter(v);
+    $("v-" + id).textContent = v.toFixed(2);
+    if ($("q").value.trim()) run();
+  });
+}
+
+/* ============ input wiring ============ */
+let t;
+$("q").addEventListener("input", () => {
+  clearTimeout(t);
+  const word = $("q").value.split(/\s+/).pop();
+  t = setTimeout(() => { suggest(word); run(); }, 110);
+});
+
+$("q").addEventListener("keydown", e => {
+  if ($("sg").hidden) {
+    if (e.key === "Enter") { clearTimeout(t); run(); }
+    return;
+  }
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    active = (active + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    [...$("sg").children].forEach((el, i) => el.classList.toggle("on", i === active));
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    if (active >= 0) pick(active);
+    else { hideSg(); clearTimeout(t); run(); }
+  } else if (e.key === "Escape") hideSg();
+});
+
+/* ============ guided tour ============ */
+const STEPS = [
+  {
+    el: () => $("sb"),
+    t: "Start with a query",
+    h: `<p>Type here and results update as you go. Suggestions appear after two
+        characters, drawn from a trie built over the whole vocabulary.</p>
+        <p>The chips below are worth trying — each one demonstrates something
+        different about how ranking behaves.</p>`
+  },
+  {
+    el: () => $("readout"),
+    t: "What the engine actually searched for",
+    h: `<p>Your text isn't looked up as typed. It's lowercased, stripped of HTML,
+        split on punctuation, filtered for stopwords, and stemmed.</p>
+        <p><code>Searching</code> becomes <code>search</code>. Terms struck
+        through here were removed or aren't in the index.</p>
+        <p>Latency is engine time only — scoring and ranking, no network.</p>`
+  },
+  {
+    el: () => document.querySelector(".hit"),
+    t: "Click a score to open the maths",
+    h: `<p>Every ranking decision is inspectable. The orange number expands into
+        a table showing each term's rarity, its frequency in that document, the
+        length penalty, and what it contributed.</p>
+        <p>The contributions sum exactly to the total. Nothing is hidden.</p>`
+  },
+  {
+    el: () => $("mod-params"),
+    t: "Change the ranking formula live",
+    h: `<p>These two knobs are BM25's parameters, and results re-rank as you
+        drag.</p>
+        <p>Pull <code>b</code> down to zero and long comments climb — the length
+        penalty is gone. Pull <code>k1</code> to zero and repetition stops
+        counting entirely.</p>`
+  },
+  {
+    el: () => $("mod-hist"),
+    t: "Watch the latency distribution",
+    h: `<p>Every query you run adds a bar. Rare terms are nearly free; a common
+        word like "ai" touches 11,600 documents and spikes.</p>
+        <p>That spread is why percentiles matter more than averages — the slow
+        tail is what a user notices.</p>`
+  },
+  {
+    el: () => $("mod-post"),
+    t: "Look inside the index",
+    h: `<p>Type any term here to see its raw posting list: which documents
+        contain it, and how many times.</p>
+        <p>This is the actual data structure, stored in flat typed arrays at
+        8 bytes per entry.</p>`
+  },
+];
+
+let step = -1;
+
+function positionTour(el) {
+  const spot = $("spot"), box = $("tour");
+  const r = el.getBoundingClientRect();
+  const pad = 4;
+
+  spot.style.top    = (r.top - pad) + "px";
+  spot.style.left   = (r.left - pad) + "px";
+  spot.style.width  = (r.width + pad * 2) + "px";
+  spot.style.height = (r.height + pad * 2) + "px";
+
+  const bw = box.offsetWidth, bh = box.offsetHeight;
+  let left = r.left + r.width / 2 - bw / 2;
+  let top  = r.bottom + 14;
+  if (top + bh > window.innerHeight - 12) top = r.top - bh - 14;
+  if (top < 12) top = Math.min(window.innerHeight - bh - 12, r.bottom + 14);
+  left = Math.max(12, Math.min(left, window.innerWidth - bw - 12));
+
+  box.style.left = left + "px";
+  box.style.top  = top + "px";
+}
+
+function showStep(i) {
+  if (i < 0 || i >= STEPS.length) return endTour();
+  const s = STEPS[i];
+  const el = s.el();
+  if (!el) return showStep(i > step ? i + 1 : i - 1); // skip if not rendered
+
+  step = i;
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+
+  $("tour").innerHTML = `
+    <h4>${esc(s.t)}</h4>${s.h}
+    <div class="nav">
+      <span class="step">${i + 1} / ${STEPS.length}</span>
+      ${i > 0 ? '<button data-tour="prev">back</button>' : ""}
+      <button data-tour="end">skip</button>
+      <button class="go" data-tour="next">${i === STEPS.length - 1 ? "done" : "next"}</button>
+    </div>`;
+
+  $("spot").hidden = false;
+  $("tour").hidden = false;
+  requestAnimationFrame(() => positionTour(el));
+}
+
+function startTour() {
+  hideHelp();
+  hideSg();
+  // seed a query so the results-related steps have something to point at
+  if (!lastResults) {
+    $("q").value = "open source";
+    run().then(() => showStep(0));
+  } else {
+    showStep(0);
+  }
+}
+
+function endTour() {
+  step = -1;
+  $("spot").hidden = true;
+  $("tour").hidden = true;
+  try { localStorage.setItem("ms-tour-seen", "1"); } catch {}
+}
+
+$("tour").addEventListener("click", e => {
+  const act = e.target.dataset.tour;
+  if (act === "next") showStep(step + 1);
+  else if (act === "prev") showStep(step - 1);
+  else if (act === "end") endTour();
+});
+
+$("start-tour").addEventListener("click", startTour);
+
+window.addEventListener("resize", () => {
+  if (step >= 0) { const el = STEPS[step].el(); if (el) positionTour(el); }
+});
+
+/* ============ global handlers ============ */
+document.addEventListener("click", e => {
+  const btn = e.target.closest("[data-help]");
+  if (btn) { e.stopPropagation(); showHelp(btn, btn.dataset.help); return; }
+  if (!e.target.closest("#pop")) hideHelp();
+  if (!e.target.closest(".searchbar")) hideSg();
+});
+
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { hideHelp(); if (step >= 0) endTour(); }
+  if (step >= 0) {
+    if (e.key === "ArrowRight" || e.key === "Enter") { e.preventDefault(); showStep(step + 1); }
+    if (e.key === "ArrowLeft") { e.preventDefault(); showStep(step - 1); }
+  }
+});
+
+window.addEventListener("scroll", hideHelp, true);
+
+/* offer the tour on a first visit */
+try {
+  if (!localStorage.getItem("ms-tour-seen")) setTimeout(startTour, 700);
+} catch {}
+</script>
+</body>
+</html>

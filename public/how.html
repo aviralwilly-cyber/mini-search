@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>how mini-search works</title>
+<style>
+  :root {
+    --bg:      #0b0d10;
+    --panel:   #101318;
+    --rule:    #1e232c;
+    --rule-hi: #2c333f;
+    --text:    #d6dbe3;
+    --dim:     #6b7480;
+    --dimmer:  #454d59;
+    --accent:  #7dd3a0;
+    --warm:    #d9a05b;
+    --hot:     #e07a5f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.5 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header { border-bottom: 1px solid var(--rule); padding: 14px 20px;
+           display: flex; align-items: baseline; gap: 16px; position: sticky;
+           top: 0; background: var(--bg); z-index: 10; }
+  header h1 { font-size: 13px; font-weight: 600; margin: 0; }
+  header .back { margin-left: auto; font-size: 11px; }
+
+  .wrap { max-width: 780px; margin: 0 auto; padding: 34px 20px 60px; }
+
+  .lede { color: var(--dim); font-size: 13.5px; line-height: 1.75;
+          border-left: 2px solid var(--accent); padding-left: 16px; margin-bottom: 40px; }
+  .lede b { color: var(--text); font-weight: 500; }
+
+  section { margin-bottom: 46px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .1em;
+       color: var(--accent); margin: 0 0 4px; font-weight: 500; }
+  h2 .n { color: var(--dimmer); margin-right: 9px; }
+  h3 { font-size: 15px; font-weight: 600; margin: 0 0 14px; letter-spacing: -.01em; }
+  p { color: var(--dim); line-height: 1.75; margin: 0 0 13px; }
+  p b { color: var(--text); font-weight: 500; }
+  code { color: var(--accent); font-size: 12px; }
+
+  figure { margin: 22px 0; border: 1px solid var(--rule);
+           background: var(--panel); padding: 20px 18px 14px; }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption { color: var(--dimmer); font-size: 10.5px; margin-top: 14px;
+               padding-top: 11px; border-top: 1px solid var(--rule); line-height: 1.6; }
+
+  .note { border: 1px solid var(--rule); border-left: 2px solid var(--warm);
+          background: var(--panel); padding: 12px 15px; margin: 18px 0;
+          font-size: 12px; color: var(--dim); line-height: 1.7; }
+  .note b { color: var(--warm); font-weight: 500; }
+
+  table { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 12px; }
+  th { text-align: right; color: var(--dimmer); font-weight: 400; font-size: 10px;
+       text-transform: uppercase; letter-spacing: .07em;
+       padding: 7px 10px; border-bottom: 1px solid var(--rule-hi); }
+  th:first-child, td:first-child { text-align: left; }
+  td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--rule); color: var(--dim); }
+  td:first-child { color: var(--text); }
+  td.win { color: var(--accent); }
+
+  ul { color: var(--dim); line-height: 1.8; padding-left: 20px; margin: 0 0 13px; }
+  li { margin-bottom: 5px; }
+  li b { color: var(--text); font-weight: 500; }
+
+  .credit { border-top: 1px solid var(--rule); padding: 15px 20px 22px;
+            color: var(--dimmer); font-size: 10.5px;
+            display: flex; gap: 8px 16px; flex-wrap: wrap; }
+  .credit .sep { color: var(--rule-hi); }
+  .credit a { color: var(--text); border-bottom: 1px dotted var(--dimmer); }
+  .credit a:hover { color: var(--accent); border-color: var(--accent); text-decoration: none; }
+
+  /* svg helpers */
+  .sv-lbl  { fill: #6b7480; font: 10px ui-monospace, monospace; }
+  .sv-dim  { fill: #454d59; font: 9.5px ui-monospace, monospace; }
+  .sv-txt  { fill: #d6dbe3; font: 10.5px ui-monospace, monospace; }
+  .sv-acc  { fill: #7dd3a0; font: 10.5px ui-monospace, monospace; }
+  .sv-warm { fill: #d9a05b; font: 10.5px ui-monospace, monospace; }
+  .sv-box  { fill: #171b22; stroke: #2c333f; }
+  .sv-boxa { fill: #16241d; stroke: #7dd3a0; }
+  .sv-boxw { fill: #241d14; stroke: #d9a05b; }
+  .sv-line { stroke: #2c333f; fill: none; }
+  .sv-arr  { stroke: #454d59; fill: none; marker-end: url(#a); }
+  .sv-arra { stroke: #7dd3a0; fill: none; marker-end: url(#aa); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>how mini-search works</h1>
+  <a class="back" href="/">← back to the search</a>
+</header>
+
+<div class="wrap">
+
+  <p class="lede">
+    A search engine written from scratch in TypeScript — no Elasticsearch, no
+    Lucene, no search libraries of any kind. The tokenizer, stemmer, inverted
+    index, BM25 ranking and trie autocomplete are all hand-written. It indexes
+    <b>100,000 Hacker News stories and comments</b> and answers queries in well
+    under a millisecond.
+  </p>
+
+  <!-- ===================== 1 ===================== -->
+  <section>
+    <h2><span class="n">01</span>The problem</h2>
+    <h3>Why not just read every document?</h3>
+
+    <p>
+      Imagine 100,000 documents and someone asks for every one mentioning
+      <b>dragon</b>. The obvious approach is to open document 1, read it,
+      open document 2, read it, and so on. That works, and it is unbearably slow
+      — the cost grows with the size of the collection, so every document you add
+      makes every future query slower.
+    </p>
+    <p>
+      The fix is the same one textbooks have used for centuries: build an index
+      once, then look things up instead of reading everything.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 700 240" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="a" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 z" fill="#454d59"/>
+          </marker>
+          <marker id="aa" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+            <path d="M0,0 L7,3.5 L0,7 z" fill="#7dd3a0"/>
+          </marker>
+        </defs>
+
+        <text x="10" y="16" class="sv-lbl">FORWARD — document points to its words</text>
+        <g>
+          <rect x="10" y="30" width="86" height="26" class="sv-box"/>
+          <text x="24" y="47" class="sv-txt">doc 0</text>
+          <path d="M100,43 L134,43" class="sv-arr"/>
+          <text x="140" y="47" class="sv-dim">rust, compiler, fast</text>
+
+          <rect x="10" y="66" width="86" height="26" class="sv-box"/>
+          <text x="24" y="83" class="sv-txt">doc 1</text>
+          <path d="M100,79 L134,79" class="sv-arr"/>
+          <text x="140" y="83" class="sv-dim">python, slow, easy</text>
+
+          <rect x="10" y="102" width="86" height="26" class="sv-box"/>
+          <text x="24" y="119" class="sv-txt">doc 2</text>
+          <path d="M100,115 L134,115" class="sv-arr"/>
+          <text x="140" y="119" class="sv-dim">rust, memory, safe</text>
+        </g>
+        <text x="10" y="150" class="sv-dim">to find "rust" you must read all three</text>
+
+        <line x1="360" y1="8" x2="360" y2="232" class="sv-line"/>
+
+        <text x="384" y="16" class="sv-acc" style="font-size:10px">INVERTED — word points to its documents</text>
+        <g>
+          <rect x="384" y="30" width="92" height="26" class="sv-boxa"/>
+          <text x="398" y="47" class="sv-acc">rust</text>
+          <path d="M480,43 L514,43" class="sv-arra"/>
+          <text x="520" y="47" class="sv-txt">doc 0, doc 2</text>
+
+          <rect x="384" y="66" width="92" height="26" class="sv-box"/>
+          <text x="398" y="83" class="sv-txt">compiler</text>
+          <path d="M480,79 L514,79" class="sv-arr"/>
+          <text x="520" y="83" class="sv-dim">doc 0</text>
+
+          <rect x="384" y="102" width="92" height="26" class="sv-box"/>
+          <text x="398" y="119" class="sv-txt">python</text>
+          <path d="M480,115 L514,115" class="sv-arr"/>
+          <text x="520" y="119" class="sv-dim">doc 1</text>
+
+          <rect x="384" y="138" width="92" height="26" class="sv-box"/>
+          <text x="398" y="155" class="sv-txt">memory</text>
+          <path d="M480,151 L514,151" class="sv-arr"/>
+          <text x="520" y="155" class="sv-dim">doc 2</text>
+        </g>
+        <text x="384" y="186" class="sv-acc" style="font-size:9.5px">one lookup, answer in hand</text>
+      </svg>
+      <figcaption>
+        The inverted index flips the relationship. Each entry in the right-hand
+        list is called a <b>posting</b> — a single word→document link. This index
+        holds 1.9 million of them.
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ===================== 2 ===================== -->
+  <section>
+    <h2><span class="n">02</span>Analysis</h2>
+    <h3>Turning messy text into clean terms</h3>
+
+    <p>
+      Raw text can't go straight into the index. <code>Running</code>,
+      <code>running,</code> and <code>RUNNING</code> should all be the same
+      thing, and HTML markup shouldn't be searchable at all. So every document
+      passes through a pipeline before it's indexed.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 700 200" xmlns="http://www.w3.org/2000/svg">
+        <text x="10" y="16" class="sv-lbl">INPUT</text>
+        <rect x="10" y="24" width="680" height="26" class="sv-box"/>
+        <text x="22" y="41" class="sv-txt">&lt;p&gt;The Rust compilers are RUNNING fast&amp;#x2F;slow&lt;/p&gt;</text>
+
+        <path d="M350,52 L350,68" class="sv-arr"/>
+
+        <g>
+          <rect x="10" y="74" width="122" height="24" class="sv-box"/>
+          <text x="22" y="90" class="sv-lbl">strip html</text>
+          <path d="M136,86 L152,86" class="sv-arr"/>
+
+          <rect x="156" y="74" width="122" height="24" class="sv-box"/>
+          <text x="168" y="90" class="sv-lbl">lowercase</text>
+          <path d="M282,86 L298,86" class="sv-arr"/>
+
+          <rect x="302" y="74" width="122" height="24" class="sv-box"/>
+          <text x="314" y="90" class="sv-lbl">split</text>
+          <path d="M428,86 L444,86" class="sv-arr"/>
+
+          <rect x="448" y="74" width="112" height="24" class="sv-box"/>
+          <text x="460" y="90" class="sv-lbl">stopwords</text>
+          <path d="M564,86 L580,86" class="sv-arr"/>
+
+          <rect x="584" y="74" width="106" height="24" class="sv-boxa"/>
+          <text x="596" y="90" class="sv-acc" style="font-size:10px">stem</text>
+        </g>
+
+        <path d="M350,102 L350,118" class="sv-arr"/>
+
+        <text x="10" y="134" class="sv-lbl">TERMS</text>
+        <g>
+          <rect x="10" y="142" width="66" height="24" class="sv-boxa"/>
+          <text x="24" y="158" class="sv-acc">rust</text>
+          <rect x="84" y="142" width="86" height="24" class="sv-boxa"/>
+          <text x="98" y="158" class="sv-acc">compil</text>
+          <rect x="178" y="142" width="66" height="24" class="sv-boxa"/>
+          <text x="192" y="158" class="sv-acc">runn</text>
+          <rect x="252" y="142" width="60" height="24" class="sv-boxa"/>
+          <text x="266" y="158" class="sv-acc">fast</text>
+          <rect x="320" y="142" width="60" height="24" class="sv-boxa"/>
+          <text x="334" y="158" class="sv-acc">slow</text>
+        </g>
+        <text x="396" y="158" class="sv-dim">"the", "are" dropped as stopwords</text>
+      </svg>
+      <figcaption>
+        <b>Stemming</b> chops suffixes so related words collapse together, which
+        is why <code>compilers</code> becomes <code>compil</code>. The stems
+        aren't real words — they don't need to be, they only need to be
+        consistent.
+      </figcaption>
+    </figure>
+
+    <div class="note">
+      <b>The invariant that matters most.</b> Queries run through the identical
+      pipeline. If indexing and querying ever disagree — even by one rule — a
+      query for "compilers" looks up a term that was never stored, and search
+      silently returns nothing. Not an error, just empty results. Both paths call
+      one shared <code>analyze()</code> function for exactly this reason.
+    </div>
+  </section>
+
+  <!-- ===================== 3 ===================== -->
+  <section>
+    <h2><span class="n">03</span>Ranking</h2>
+    <h3>BM25: deciding what goes first</h3>
+
+    <p>
+      Finding matching documents is the easy half. Ten thousand documents contain
+      "rust" — which one does the searcher actually want? BM25 is a ranking
+      function from the 1990s that's still the default in Elasticsearch and
+      Lucene today. It balances three signals.
+    </p>
+
+    <p>
+      <b>Rarity (idf).</b> A word appearing in every document tells you nothing.
+      A word appearing in twelve documents is a strong signal. Rarity is measured
+      as <code>ln(1 + (N − df + 0.5) / (df + 0.5))</code>, where
+      <code>df</code> is how many documents contain the term.
+    </p>
+
+    <p>
+      <b>Repetition (tf), with diminishing returns.</b> A document mentioning
+      "rust" nine times is probably more about Rust than one mentioning it once.
+      But fifty mentions versus fifty-five tells you almost nothing extra. The
+      parameter <code>k1</code> controls where that curve flattens.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 700 240" xmlns="http://www.w3.org/2000/svg">
+        <line x1="50" y1="200" x2="470" y2="200" class="sv-line"/>
+        <line x1="50" y1="200" x2="50" y2="40" class="sv-line"/>
+
+        <text x="240" y="228" class="sv-lbl">term frequency in the document →</text>
+        <text x="14" y="46" class="sv-dim">score</text>
+        <text x="46" y="216" class="sv-dim">0</text>
+        <text x="146" y="216" class="sv-dim">5</text>
+        <text x="246" y="216" class="sv-dim">10</text>
+        <text x="446" y="216" class="sv-dim">20</text>
+
+        <polyline points="50,200 70,160 90,152 110,148.6 150,145.5 210,143.5 290,142.4 450,141.5"
+                  fill="none" stroke="#454d59" stroke-width="1.5"/>
+        <polyline points="50,200 70,160 90,145 110,137.1 150,129.1 210,123.5 290,120 370,118.1 450,117"
+                  fill="none" stroke="#7dd3a0" stroke-width="1.8"/>
+        <polyline points="50,200 70,160 90,136 110,120 150,100 210,83.6 290,72 370,65.3 450,60.9"
+                  fill="none" stroke="#d9a05b" stroke-width="1.5"/>
+
+        <text x="482" y="145" class="sv-dim">k1 = 0.5</text>
+        <text x="482" y="121" class="sv-acc" style="font-size:9.5px">k1 = 1.2 (default)</text>
+        <text x="482" y="65" class="sv-warm" style="font-size:9.5px">k1 = 3.0</text>
+
+        <text x="482" y="176" class="sv-dim" style="font-size:9px">lower k1 flattens sooner —</text>
+        <text x="482" y="189" class="sv-dim" style="font-size:9px">repetition stops mattering</text>
+      </svg>
+      <figcaption>
+        Every curve rises steeply at first, then flattens. That shape is the
+        whole point — the difference between one mention and five is large, the
+        difference between fifteen and twenty is negligible.
+      </figcaption>
+    </figure>
+
+    <p>
+      <b>Length (norm).</b> A five-thousand-word comment will contain your query
+      word eventually, purely by chance. A six-word headline containing it is far
+      more likely to be about it. The parameter <code>b</code> controls how hard
+      long documents are penalised — at <code>b = 0</code> length is ignored
+      entirely, at <code>b = 1</code> it applies in full.
+    </p>
+
+    <div class="note">
+      Both parameters are exposed as live sliders on the search page, and results
+      re-rank as you drag. Pulling <b>b</b> to zero is the most striking one —
+      long comments immediately take over the top of the results.
+    </div>
+  </section>
+
+  <!-- ===================== 4 ===================== -->
+  <section>
+    <h2><span class="n">04</span>Memory layout</h2>
+    <h3>Why the index is flat arrays, not objects</h3>
+
+    <p>
+      The natural way to store this in JavaScript is
+      <code>Map&lt;string, {docId, termFreq}[]&gt;</code>. That works, and it
+      cost <b>181 MB</b> for 1.9 million postings — roughly 96 bytes each to hold
+      two integers that need eight.
+    </p>
+    <p>
+      The overhead is V8's. Every posting is a separately allocated heap object
+      with a header and a hidden-class pointer, and every posting list is an
+      array of pointers to those scattered objects. Iterating a list means
+      chasing pointers all over the heap, so it's slow for cache reasons on top
+      of being large.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg">
+        <text x="10" y="16" class="sv-lbl">TERM DICTIONARY — term to slot number</text>
+        <rect x="10" y="24" width="150" height="24" class="sv-box"/>
+        <text x="22" y="40" class="sv-txt">"rust"</text>
+        <text x="120" y="40" class="sv-acc">→ 2</text>
+
+        <path d="M170,36 L200,36" class="sv-arra"/>
+
+        <text x="212" y="16" class="sv-lbl">OFFSETS — slot to start position</text>
+        <g>
+          <rect x="212" y="24" width="46" height="24" class="sv-box"/>
+          <text x="228" y="40" class="sv-dim">0</text>
+          <rect x="258" y="24" width="46" height="24" class="sv-box"/>
+          <text x="274" y="40" class="sv-dim">3</text>
+          <rect x="304" y="24" width="46" height="24" class="sv-boxa"/>
+          <text x="320" y="40" class="sv-acc">5</text>
+          <rect x="350" y="24" width="46" height="24" class="sv-boxa"/>
+          <text x="366" y="40" class="sv-acc">9</text>
+          <rect x="396" y="24" width="46" height="24" class="sv-box"/>
+          <text x="412" y="40" class="sv-dim">12</text>
+          <rect x="442" y="24" width="56" height="24" class="sv-boxw"/>
+          <text x="454" y="40" class="sv-warm" style="font-size:9.5px">14 ⌐</text>
+        </g>
+        <text x="212" y="62" class="sv-dim">slot 0</text>
+        <text x="308" y="62" class="sv-acc" style="font-size:9px">slot 2</text>
+        <text x="446" y="62" class="sv-warm" style="font-size:9px">sentinel</text>
+
+        <path d="M327,68 L327,86" class="sv-arra"/>
+        <path d="M373,68 L373,86" class="sv-arra"/>
+        <text x="392" y="82" class="sv-acc" style="font-size:9.5px">postings for "rust" = [5, 9)</text>
+
+        <text x="10" y="112" class="sv-lbl">docIds — Uint32Array</text>
+        <g>
+          <rect x="10" y="120" width="42" height="24" class="sv-box"/><text x="24" y="136" class="sv-dim">4</text>
+          <rect x="52" y="120" width="42" height="24" class="sv-box"/><text x="66" y="136" class="sv-dim">9</text>
+          <rect x="94" y="120" width="42" height="24" class="sv-box"/><text x="104" y="136" class="sv-dim">17</text>
+          <rect x="136" y="120" width="42" height="24" class="sv-box"/><text x="146" y="136" class="sv-dim">23</text>
+          <rect x="178" y="120" width="42" height="24" class="sv-box"/><text x="188" y="136" class="sv-dim">31</text>
+          <rect x="220" y="120" width="42" height="24" class="sv-boxa"/><text x="230" y="136" class="sv-acc">40</text>
+          <rect x="262" y="120" width="42" height="24" class="sv-boxa"/><text x="272" y="136" class="sv-acc">55</text>
+          <rect x="304" y="120" width="42" height="24" class="sv-boxa"/><text x="314" y="136" class="sv-acc">61</text>
+          <rect x="346" y="120" width="42" height="24" class="sv-boxa"/><text x="356" y="136" class="sv-acc">78</text>
+          <rect x="388" y="120" width="42" height="24" class="sv-box"/><text x="398" y="136" class="sv-dim">80</text>
+          <rect x="430" y="120" width="42" height="24" class="sv-box"/><text x="440" y="136" class="sv-dim">91</text>
+          <rect x="472" y="120" width="42" height="24" class="sv-box"/><text x="480" y="136" class="sv-dim">102</text>
+          <rect x="514" y="120" width="42" height="24" class="sv-box"/><text x="522" y="136" class="sv-dim">110</text>
+          <rect x="556" y="120" width="42" height="24" class="sv-box"/><text x="564" y="136" class="sv-dim">119</text>
+        </g>
+
+        <text x="10" y="168" class="sv-lbl">freqs — Uint32Array, parallel</text>
+        <g>
+          <rect x="10" y="176" width="42" height="24" class="sv-box"/><text x="28" y="192" class="sv-dim">1</text>
+          <rect x="52" y="176" width="42" height="24" class="sv-box"/><text x="70" y="192" class="sv-dim">2</text>
+          <rect x="94" y="176" width="42" height="24" class="sv-box"/><text x="112" y="192" class="sv-dim">1</text>
+          <rect x="136" y="176" width="42" height="24" class="sv-box"/><text x="154" y="192" class="sv-dim">1</text>
+          <rect x="178" y="176" width="42" height="24" class="sv-box"/><text x="196" y="192" class="sv-dim">4</text>
+          <rect x="220" y="176" width="42" height="24" class="sv-boxa"/><text x="238" y="192" class="sv-acc">3</text>
+          <rect x="262" y="176" width="42" height="24" class="sv-boxa"/><text x="280" y="192" class="sv-acc">1</text>
+          <rect x="304" y="176" width="42" height="24" class="sv-boxa"/><text x="322" y="192" class="sv-acc">7</text>
+          <rect x="346" y="176" width="42" height="24" class="sv-boxa"/><text x="364" y="192" class="sv-acc">2</text>
+          <rect x="388" y="176" width="42" height="24" class="sv-box"/><text x="406" y="192" class="sv-dim">1</text>
+          <rect x="430" y="176" width="42" height="24" class="sv-box"/><text x="448" y="192" class="sv-dim">1</text>
+          <rect x="472" y="176" width="42" height="24" class="sv-box"/><text x="490" y="192" class="sv-dim">5</text>
+          <rect x="514" y="176" width="42" height="24" class="sv-box"/><text x="532" y="192" class="sv-dim">2</text>
+          <rect x="556" y="176" width="42" height="24" class="sv-box"/><text x="574" y="192" class="sv-dim">1</text>
+        </g>
+        <text x="10" y="224" class="sv-dim">every posting list is a contiguous slice — a linear scan, no pointer chasing</text>
+      </svg>
+      <figcaption>
+        <b>docId</b> is an internal sequential number, not the Hacker News id, so
+        it indexes directly into an array with no hashing. The trailing
+        <b>sentinel</b> in the offsets array means every list is bounded by
+        <code>[offsets[s], offsets[s+1])</code> with no special case for the last
+        one.
+      </figcaption>
+    </figure>
+
+    <p>
+      Scoring accumulated results in a <code>Map&lt;docId, score&gt;</code>,
+      which meant a hash operation per posting — 11,600 of them for a common
+      term. Replacing it with a <code>Float64Array</code> indexed by docId, plus
+      a list of touched ids so the reset costs the same as the scoring did,
+      removed that entirely.
+    </p>
+
+    <table>
+      <tr><th>implementation</th><th>p50</th><th>p99</th><th>throughput</th><th>memory</th></tr>
+      <tr><td>objects + Map</td><td>0.901 ms</td><td>10.40 ms</td><td>544 qps</td><td>181 MB</td></tr>
+      <tr><td>typed arrays + Map</td><td>0.633 ms</td><td>7.74 ms</td><td>745 qps</td><td>14.7 MB</td></tr>
+      <tr><td>typed arrays + accumulator</td><td class="win">0.478 ms</td><td class="win">5.75 ms</td><td class="win">974 qps</td><td class="win">14.7 MB</td></tr>
+    </table>
+
+    <div class="note">
+      <b>The measurement mattered more than the guess.</b> Packing into typed
+      arrays gave a 25% latency win — real, but far less than the 12× memory
+      reduction suggested. The profile showed the Map had become the bottleneck,
+      and fixing that produced a bigger speedup than the packing had. An
+      equivalence test asserts both implementations return byte-identical
+      rankings, so the optimisation is provably behaviour-preserving.
+    </div>
+  </section>
+
+  <!-- ===================== 5 ===================== -->
+  <section>
+    <h2><span class="n">05</span>Autocomplete</h2>
+    <h3>A trie, and the trap inside it</h3>
+
+    <p>
+      Suggestions come from a <b>trie</b> — a tree where each level is one letter.
+      Following <code>d → r → a</code> lands on a node whose subtree contains
+      every word starting with "dra". Each word is weighted by how many documents
+      contain it, so common terms surface first.
+    </p>
+
+    <figure>
+      <svg viewBox="0 0 700 230" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="60" cy="40" r="13" class="sv-box"/>
+        <text x="54" y="44" class="sv-dim">•</text>
+
+        <path d="M73,44 L106,64" class="sv-arr"/>
+        <circle cx="120" cy="72" r="13" class="sv-boxa"/>
+        <text x="116" y="76" class="sv-acc">r</text>
+
+        <path d="M133,76 L166,96" class="sv-arr"/>
+        <circle cx="180" cy="104" r="13" class="sv-boxa"/>
+        <text x="176" y="108" class="sv-acc">u</text>
+
+        <path d="M193,108 L226,128" class="sv-arr"/>
+        <circle cx="240" cy="136" r="13" class="sv-boxa"/>
+        <text x="236" y="140" class="sv-acc">s</text>
+
+        <path d="M253,140 L286,160" class="sv-arr"/>
+        <circle cx="300" cy="168" r="13" class="sv-boxa"/>
+        <text x="296" y="172" class="sv-acc">t</text>
+
+        <rect x="326" y="156" width="150" height="24" class="sv-boxa"/>
+        <text x="338" y="172" class="sv-acc">rust — 1,204 docs</text>
+
+        <path d="M253,132 L292,112" class="sv-arr"/>
+        <circle cx="306" cy="104" r="13" class="sv-box"/>
+        <text x="302" y="108" class="sv-dim">h</text>
+        <rect x="332" y="92" width="150" height="24" class="sv-box"/>
+        <text x="344" y="108" class="sv-dim">rush — 88 docs</text>
+
+        <path d="M133,68 L172,48" class="sv-arr"/>
+        <circle cx="186" cy="40" r="13" class="sv-box"/>
+        <text x="182" y="44" class="sv-dim">e</text>
+        <rect x="212" y="28" width="176" height="24" class="sv-box"/>
+        <text x="224" y="44" class="sv-dim">react, redis, remote…</text>
+
+        <line x1="516" y1="14" x2="516" y2="216" class="sv-line"/>
+        <text x="538" y="30" class="sv-warm" style="font-size:10px">EACH NODE STORES</text>
+        <text x="538" y="44" class="sv-warm" style="font-size:10px">ITS OWN TOP 10</text>
+        <text x="538" y="72" class="sv-dim" style="font-size:9.5px">so a lookup is a walk</text>
+        <text x="538" y="86" class="sv-dim" style="font-size:9.5px">to the prefix node and</text>
+        <text x="538" y="100" class="sv-dim" style="font-size:9.5px">an array read — no</text>
+        <text x="538" y="114" class="sv-dim" style="font-size:9.5px">subtree traversal at all</text>
+        <text x="538" y="146" class="sv-dim" style="font-size:9.5px">"a" now costs the same</text>
+        <text x="538" y="160" class="sv-dim" style="font-size:9.5px">as "autocomplete"</text>
+      </svg>
+      <figcaption>
+        Only the highlighted path is walked for the prefix <code>rust</code>. The
+        node's precomputed list is returned directly.
+      </figcaption>
+    </figure>
+
+    <p>
+      The naive version descended to the prefix node and then enumerated its
+      whole subtree. That's fine for a long prefix and catastrophic for a short
+      one: typing a single letter meant walking a subtree holding a large share
+      of the 68,000-word vocabulary. Measured cost was <b>16.4 ms</b> for
+      <code>"a"</code> against <b>0.6 ms</b> for <code>"goo"</code> — a 26×
+      spread from one keystroke.
+    </p>
+
+    <p>
+      The fix is a bottom-up pass after construction. Each node merges its
+      children's top-10 lists plus its own word, and keeps the best 10. The key
+      insight is that a word which didn't make a child's top-10 can't make the
+      parent's either, so each merge is bounded by
+      <code>childCount × 10</code> rather than by subtree size.
+    </p>
+
+    <table>
+      <tr><th>prefix</th><th>subtree walk</th><th>precomputed top-k</th></tr>
+      <tr><td>"a"</td><td>16.386 ms</td><td class="win">0.098 ms</td></tr>
+      <tr><td>"goo"</td><td>0.618 ms</td><td class="win">0.023 ms</td></tr>
+    </table>
+
+    <div class="note">
+      Both implementations are kept in the codebase, and a test asserts they
+      return identical results for every prefix. The slow one isn't dead code —
+      it's the reference the fast one is checked against.
+    </div>
+  </section>
+
+  <!-- ===================== 6 ===================== -->
+  <section>
+    <h2><span class="n">06</span>Honesty</h2>
+    <h3>Known limitations</h3>
+
+    <p>
+      Everything above describes what works. These are the parts that don't, and
+      they're listed because knowing where a system is weak is more useful than
+      pretending it isn't.
+    </p>
+
+    <ul>
+      <li><b>Contractions break.</b> The tokenizer splits on non-alphanumerics,
+        so <code>don't</code> becomes <code>don</code> plus a discarded
+        <code>t</code>. <code>C++</code> becomes <code>c</code>.</li>
+      <li><b>The stemmer is crude.</b> It's suffix-stripping, not the real Porter
+        algorithm, so <code>running</code> stems to <code>runn</code> and doesn't
+        collapse with <code>runs</code>. Autocomplete occasionally shows both
+        <code>google</code> and <code>googl</code> as a result.</li>
+      <li><b>No phrase queries.</b> Searching "machine learning" finds documents
+        containing either word, not the phrase. Real phrase support needs
+        positional postings, which changes the index structure.</li>
+      <li><b>No typo tolerance.</b> A misspelled query finds nothing. A BK-tree
+        or Levenshtein automaton would fix this.</li>
+      <li><b>Near-duplicates survive.</b> Exact title matches are deduplicated at
+        ingest, but resubmissions with slightly different titles still appear
+        twice. SimHash or MinHash would catch them.</li>
+      <li><b>Purely lexical.</b> There's no semantic understanding — a search for
+        "car" won't find "automobile".</li>
+      <li><b>The index is rebuilt at startup</b> rather than loaded from a
+        serialized form, costing about 3.6 seconds on boot.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">07</span>Stack</h2>
+    <h3>What's actually in it</h3>
+    <p>
+      TypeScript in strict mode with <code>noUncheckedIndexedAccess</code>,
+      Node 22, and Fastify for the HTTP layer. Vitest for the test suite, which
+      includes a brute-force reference implementation the index is checked
+      against. The frontend is a single static HTML file with no build step, no
+      framework, and no dependencies — for a UI this small, that's a smaller
+      thing to maintain and one fewer process to deploy.
+    </p>
+    <p>
+      The corpus comes from the public Hacker News Algolia API, deduplicated and
+      HTML-stripped at ingest, stored as newline-delimited JSON so it can be
+      streamed rather than parsed whole.
+    </p>
+  </section>
+
+</div>
+
+<footer class="credit">
+  <span>Built and designed by
+    <a href="https://github.com/aviralwilly-cyber" target="_blank" rel="noopener">Aviral Abel Willy</a>.</span>
+  <span class="sep">·</span>
+  <span>© 2026 All rights reserved.</span>
+  <span class="sep">·</span>
+  <a href="/">back to the search</a>
+</footer>
+
+</body>
+</html>
